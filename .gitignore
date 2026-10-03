@@ -1,0 +1,16 @@
+# Binaries
+/app
+*.exe
+bin/
+
+# Env
+.env
+
+# Go
+vendor/
+
+# OS / editor
+.DS_Store
+*.log
+__pycache__/
+.venv/
