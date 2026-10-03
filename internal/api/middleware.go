@@ -2,11 +2,16 @@ package api
 
 import (
 	"context"
+	"crypto/subtle"
+	"errors"
 	"log/slog"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
+	"github.com/go-chi/chi/v5"
+	"github.com/golang-jwt/jwt/v5"
 	"github.com/google/uuid"
 
 	"github.com/tanveer-shaikh-90/seat-reservation/internal/metrics"
@@ -24,7 +29,7 @@ const (
 func RequestID(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		rid := r.Header.Get("X-Request-ID")
-		if rid == "" {
+		if _, err := uuid.Parse(rid); err != nil {
 			rid = uuid.NewString()
 		}
 		ctx := context.WithValue(r.Context(), ctxRequestID, rid)
@@ -53,7 +58,7 @@ func Observe(logger *slog.Logger) func(http.Handler) http.Handler {
 			next.ServeHTTP(rec, r)
 
 			route := routeLabel(r)
-			status := http.StatusText(rec.status)
+			status := strconv.Itoa(rec.status)
 			metrics.RequestDuration.WithLabelValues(route, r.Method, status).
 				Observe(time.Since(start).Seconds())
 			metrics.RequestsTotal.WithLabelValues(route, r.Method, status).Inc()
@@ -73,40 +78,73 @@ func Observe(logger *slog.Logger) func(http.Handler) http.Handler {
 
 // routeLabel normalises paths so metrics cardinality stays bounded.
 func routeLabel(r *http.Request) string {
-	p := r.URL.Path
-	switch {
-	case strings.HasPrefix(p, "/shows/") && strings.HasSuffix(p, "/reserve"):
-		return "POST /shows/{id}/reserve"
-	case strings.HasPrefix(p, "/reservations/") && strings.HasSuffix(p, "/cancel"):
-		return "POST /reservations/{id}/cancel"
-	case strings.HasPrefix(p, "/shows/") && r.Method == http.MethodGet:
-		return "GET /shows/{id}"
-	default:
-		return r.Method + " " + p
+	if route := chi.RouteContext(r.Context()); route != nil && route.RoutePattern() != "" {
+		return route.RoutePattern()
 	}
+	return "unmatched"
 }
 
-// Auth derives identity strictly from the bearer token. Any user_id in the body
-// is ignored, so a request can only ever act as the token's user.
-// Token convention: "Bearer admin-<name>" is an admin; "Bearer <anything>" is a user.
-func Auth(next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		auth := r.Header.Get("Authorization")
-		if !strings.HasPrefix(auth, "Bearer ") {
-			writeError(w, r, http.StatusUnauthorized, "unauthorized", "missing bearer token")
-			return
-		}
-		token := strings.TrimSpace(strings.TrimPrefix(auth, "Bearer "))
-		if token == "" {
-			writeError(w, r, http.StatusUnauthorized, "unauthorized", "empty bearer token")
-			return
-		}
+type Authenticator struct {
+	secret []byte
+	adminToken string
+}
 
-		isAdmin := strings.HasPrefix(token, "admin-")
-		userID := token // the token IS the identity
+func NewAuthenticator(secret, adminToken string) (*Authenticator, error) {
+	if len(secret) < 32 || len(adminToken) < 32 || secret == adminToken {
+		return nil, errors.New("AUTH_SECRET and ADMIN_TOKEN must be distinct secrets of at least 32 bytes")
+	}
+	return &Authenticator{secret: []byte(secret), adminToken: adminToken}, nil
+}
+
+func (a *Authenticator) IssueToken(w http.ResponseWriter, r *http.Request) {
+	now := time.Now()
+	claims := jwt.RegisteredClaims{
+		Issuer: "seat-reservation",
+		Audience: jwt.ClaimStrings{"seat-reservation"},
+		Subject: uuid.NewString(),
+		IssuedAt: jwt.NewNumericDate(now),
+		ExpiresAt: jwt.NewNumericDate(now.Add(24 * time.Hour)),
+	}
+	token, err := jwt.NewWithClaims(jwt.SigningMethodHS256, claims).SignedString(a.secret)
+	if err != nil {
+		writeError(w, r, http.StatusInternalServerError, "internal_error", "token issuance failed")
+		return
+	}
+	writeJSON(w, http.StatusCreated, map[string]any{"token": token, "user_id": claims.Subject, "expires_at": claims.ExpiresAt.Time})
+}
+
+func (a *Authenticator) Auth(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		parts := strings.Fields(r.Header.Get("Authorization"))
+		if len(parts) != 2 || !strings.EqualFold(parts[0], "Bearer") || len(parts[1]) > 4096 {
+			writeError(w, r, http.StatusUnauthorized, "unauthorized", "valid bearer token required")
+			return
+		}
+		isAdmin := subtle.ConstantTimeCompare([]byte(parts[1]), []byte(a.adminToken)) == 1
+		userID := "admin"
+		if !isAdmin {
+			claims := &jwt.RegisteredClaims{}
+			token, err := jwt.ParseWithClaims(parts[1], claims, func(token *jwt.Token) (any, error) {
+				return a.secret, nil
+			}, jwt.WithValidMethods([]string{"HS256"}), jwt.WithIssuer("seat-reservation"), jwt.WithAudience("seat-reservation"), jwt.WithExpirationRequired())
+			if err != nil || !token.Valid || claims.Subject == "" || len(claims.Subject) > 200 {
+				writeError(w, r, http.StatusUnauthorized, "unauthorized", "invalid or expired token")
+				return
+			}
+			userID = claims.Subject
+		}
 
 		ctx := context.WithValue(r.Context(), ctxUserID, userID)
 		ctx = context.WithValue(ctx, ctxIsAdmin, isAdmin)
+		next.ServeHTTP(w, r.WithContext(ctx))
+	})
+}
+
+func BoundRequest(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		r.Body = http.MaxBytesReader(w, r.Body, 2<<20)
+		ctx, cancel := context.WithTimeout(r.Context(), 180*time.Second)
+		defer cancel()
 		next.ServeHTTP(w, r.WithContext(ctx))
 	})
 }

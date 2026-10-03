@@ -3,6 +3,10 @@
 
 CREATE EXTENSION IF NOT EXISTS pgcrypto;
 
+CREATE TABLE IF NOT EXISTS booking_users (
+    user_id TEXT PRIMARY KEY
+);
+
 CREATE TABLE IF NOT EXISTS shows (
     id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     name            TEXT        NOT NULL,

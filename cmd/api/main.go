@@ -27,6 +27,15 @@ func main() {
 	dsn := env("DATABASE_URL", "postgres://postgres:postgres@localhost:5432/seats?sslmode=disable")
 	port := env("PORT", "8080")
 	maxConns := envInt("DB_MAX_CONNS", 25)
+	if maxConns < 1 || maxConns > 100 {
+		logger.Error("DB_MAX_CONNS must be between 1 and 100")
+		os.Exit(1)
+	}
+	auth, err := api.NewAuthenticator(os.Getenv("AUTH_SECRET"), os.Getenv("ADMIN_TOKEN"))
+	if err != nil {
+		logger.Error("invalid auth configuration", "error", err)
+		os.Exit(1)
+	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
@@ -45,12 +54,16 @@ func main() {
 	logger.Info("migrations applied")
 
 	svc := service.New(pool)
-	srv := api.NewServer(svc, pool, logger)
+	srv := api.NewServer(svc, pool, logger, auth)
 
 	httpServer := &http.Server{
 		Addr:              ":" + port,
 		Handler:           srv.Router(),
 		ReadHeaderTimeout: 10 * time.Second,
+		ReadTimeout:       30 * time.Second,
+		WriteTimeout:      190 * time.Second,
+		IdleTimeout:       60 * time.Second,
+		MaxHeaderBytes:    16 << 10,
 	}
 
 	go func() {

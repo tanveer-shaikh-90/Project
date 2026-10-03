@@ -1,12 +1,16 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"log/slog"
 	"net/http"
 
 	"github.com/go-chi/chi/v5"
+	"github.com/jackc/pgx/v5/pgconn"
+	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 
 	"github.com/tanveer-shaikh-90/seat-reservation/internal/db"
@@ -19,10 +23,11 @@ type Server struct {
 	svc    *service.Service
 	pool   *db.Pool
 	logger *slog.Logger
+	auth   *Authenticator
 }
 
-func NewServer(svc *service.Service, pool *db.Pool, logger *slog.Logger) *Server {
-	return &Server{svc: svc, pool: pool, logger: logger}
+func NewServer(svc *service.Service, pool *db.Pool, logger *slog.Logger, auth *Authenticator) *Server {
+	return &Server{svc: svc, pool: pool, logger: logger, auth: auth}
 }
 
 // Router builds the HTTP routing tree.
@@ -30,20 +35,26 @@ func (s *Server) Router() http.Handler {
 	r := chi.NewRouter()
 	r.Use(RequestID)
 	r.Use(Observe(s.logger))
+	r.Use(BoundRequest)
 
 	// Health & metrics are unauthenticated.
 	r.Get("/health/live", s.handleLive)
 	r.Get("/health/ready", s.handleReady)
-	r.Handle("/metrics", promhttp.Handler())
+	registry := prometheus.NewRegistry()
+	registry.MustRegister(metrics.NewSnapshot(s.pool))
+	r.Handle("/metrics", promhttp.HandlerFor(prometheus.Gatherers{prometheus.DefaultGatherer, registry}, promhttp.HandlerOpts{}))
+	r.Post("/auth/token", s.auth.IssueToken)
+	r.Get("/shows/{id}", s.handleGetShow)
 
 	// Everything below requires a bearer token.
 	r.Group(func(r chi.Router) {
-		r.Use(Auth)
+		r.Use(s.auth.Auth)
 		r.Post("/shows", s.handleCreateShow)
-		r.Get("/shows/{id}", s.handleGetShow)
 		r.Post("/shows/{id}/reserve", s.handleReserve)
 		r.Post("/reservations/{id}/cancel", s.handleCancel)
 	})
+	r.NotFound(func(w http.ResponseWriter, r *http.Request) { writeError(w, r, 404, "not_found", "route not found") })
+	r.MethodNotAllowed(func(w http.ResponseWriter, r *http.Request) { writeError(w, r, 405, "method_not_allowed", "method not allowed") })
 
 	return r
 }
@@ -172,6 +183,8 @@ func (s *Server) handleCancel(w http.ResponseWriter, r *http.Request) {
 // 4xx domain outcomes and are counted by reason; only truly unexpected errors 5xx.
 func (s *Server) mapError(w http.ResponseWriter, r *http.Request, err error) {
 	switch {
+	case errors.Is(err, service.ErrInvalidRequest):
+		writeError(w, r, http.StatusBadRequest, "bad_request", err.Error())
 	case errors.Is(err, service.ErrShowNotFound):
 		writeError(w, r, http.StatusNotFound, "show_not_found", err.Error())
 	case errors.Is(err, service.ErrSeatNotFound):
@@ -196,6 +209,11 @@ func (s *Server) mapError(w http.ResponseWriter, r *http.Request, err error) {
 	default:
 		s.logger.Error("internal error",
 			"request_id", requestIDFromCtx(r.Context()), "error", err.Error())
+		var databaseError *pgconn.PgError
+		if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) || !errors.As(err, &databaseError) {
+			writeError(w, r, http.StatusServiceUnavailable, "unavailable", "database unavailable or request timed out; retry with the same idempotency key")
+			return
+		}
 		writeError(w, r, http.StatusInternalServerError, "internal_error", "unexpected error")
 	}
 }
@@ -208,6 +226,9 @@ func decodeJSON(r *http.Request, dst any) error {
 	dec := json.NewDecoder(r.Body)
 	if err := dec.Decode(dst); err != nil {
 		return err
+	}
+	if err := dec.Decode(new(any)); err != io.EOF {
+		return errors.New("request body must contain exactly one JSON object")
 	}
 	return nil
 }

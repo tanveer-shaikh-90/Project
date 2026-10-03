@@ -4,8 +4,10 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"sort"
 	"strings"
 
@@ -14,11 +16,11 @@ import (
 	"github.com/jackc/pgx/v5/pgconn"
 
 	"github.com/tanveer-shaikh-90/seat-reservation/internal/db"
-	"github.com/tanveer-shaikh-90/seat-reservation/internal/metrics"
 )
 
 // Domain errors. Each maps to a clean 4xx outcome in the HTTP layer — never a 5xx.
 var (
+	ErrInvalidRequest      = errors.New("invalid request")
 	ErrShowNotFound        = errors.New("show not found")
 	ErrSeatNotFound        = errors.New("one or more seats do not exist for this show")
 	ErrSeatTaken           = errors.New("one or more seats are already taken")
@@ -69,11 +71,16 @@ type Reservation struct {
 // CreateShow inserts a show and its seats. Duplicate seat labels in the request
 // are rejected by the UNIQUE (show_id, label) constraint.
 func (s *Service) CreateShow(ctx context.Context, name string, seats []string, pricePaise int64, perUserLimit int) (*Show, error) {
-	if len(seats) == 0 {
-		return nil, ErrNoSeats
-	}
-	if perUserLimit <= 0 {
+	if perUserLimit == 0 {
 		perUserLimit = 4
+	}
+	if strings.TrimSpace(name) == "" || len(name) > 200 || perUserLimit < 1 || perUserLimit > 10000 || pricePaise < 0 {
+		return nil, ErrInvalidRequest
+	}
+	var err error
+	seats, err = validateSeats(seats, 10000)
+	if err != nil || pricePaise > math.MaxInt64/int64(perUserLimit) {
+		return nil, ErrInvalidRequest
 	}
 
 	tx, err := s.pool.Begin(ctx)
@@ -107,21 +114,29 @@ func (s *Service) CreateShow(ctx context.Context, name string, seats []string, p
 		return nil, err
 	}
 
-	metrics.SeatsAvailable.WithLabelValues(showID).Set(float64(len(seats)))
-
-	return &Show{
+	show := &Show{
 		ID:           showID,
 		Name:         name,
 		PricePaise:   pricePaise,
 		PerUserLimit: perUserLimit,
 		TotalSeats:   len(seats),
-	}, nil
+		Counts:       map[string]int{"available": len(seats), "held": 0, "confirmed": 0},
+	}
+	for _, label := range seats {
+		show.Seats = append(show.Seats, SeatState{Label: label, Status: "available"})
+	}
+	return show, nil
 }
 
 // GetShow returns the full seat breakdown and reconciliation counts.
 func (s *Service) GetShow(ctx context.Context, showID string) (*Show, error) {
+	parsed, err := uuid.Parse(showID)
+	if err != nil {
+		return nil, ErrInvalidRequest
+	}
+	showID = parsed.String()
 	var show Show
-	err := s.pool.QueryRow(ctx,
+	err = s.pool.QueryRow(ctx,
 		`SELECT id, name, price_paise, per_user_limit FROM shows WHERE id = $1`,
 		showID,
 	).Scan(&show.ID, &show.Name, &show.PricePaise, &show.PerUserLimit)
@@ -168,15 +183,15 @@ func (s *Service) GetShow(ctx context.Context, showID string) (*Show, error) {
 //   - Behaviour is all-or-nothing: if any requested seat is unavailable, the whole
 //     request declines and nothing is reserved.
 func (s *Service) Reserve(ctx context.Context, userID, showID string, seats []string, idempotencyKey string) (*Reservation, error) {
-	if len(seats) == 0 {
-		return nil, ErrNoSeats
+	parsed, err := uuid.Parse(showID)
+	if err != nil || userID == "" || len(userID) > 200 || strings.TrimSpace(idempotencyKey) == "" || len(idempotencyKey) > 200 {
+		return nil, ErrInvalidRequest
 	}
-	if idempotencyKey == "" {
-		return nil, fmt.Errorf("%w: idempotency_key is required", ErrNoSeats)
+	showID = parsed.String()
+	seats, err = validateSeats(seats, 10000)
+	if err != nil {
+		return nil, err
 	}
-
-	// Deterministic order: dedupe + sort to fix lock acquisition order.
-	seats = dedupeSorted(seats)
 	requestHash := hashRequest(showID, seats)
 
 	tx, err := s.pool.Begin(ctx)
@@ -184,6 +199,10 @@ func (s *Service) Reserve(ctx context.Context, userID, showID string, seats []st
 		return nil, err
 	}
 	defer tx.Rollback(ctx)
+
+	if err := lockUser(ctx, tx, userID); err != nil {
+		return nil, err
+	}
 
 	// 1. Idempotency fast-path: has this (user, key) already reserved?
 	if existing, found, err := s.lookupByKey(ctx, tx, userID, idempotencyKey, requestHash); err != nil {
@@ -255,9 +274,10 @@ func (s *Service) Reserve(ctx context.Context, userID, showID string, seats []st
 		return nil, ErrPerUserLimit
 	}
 
-	// 5. Create the reservation. The UNIQUE (user_id, idempotency_key) constraint
-	//    turns a concurrent same-key retry into a replay instead of a duplicate.
 	reservationID := uuid.NewString()
+	if pricePaise > math.MaxInt64/int64(len(seats)) {
+		return nil, ErrInvalidRequest
+	}
 	amount := pricePaise * int64(len(seats))
 	_, err = tx.Exec(ctx,
 		`INSERT INTO reservations
@@ -266,15 +286,6 @@ func (s *Service) Reserve(ctx context.Context, userID, showID string, seats []st
 		reservationID, showID, userID, seats, amount, idempotencyKey, requestHash,
 	)
 	if err != nil {
-		if isUniqueViolation(err) {
-			// A concurrent request with the same key won the insert. Re-read it.
-			if existing, found, lerr := s.lookupByKey(ctx, tx, userID, idempotencyKey, requestHash); lerr != nil {
-				return nil, lerr
-			} else if found {
-				return existing, nil
-			}
-			return nil, ErrIdempotencyConflict
-		}
 		return nil, err
 	}
 
@@ -293,9 +304,6 @@ func (s *Service) Reserve(ctx context.Context, userID, showID string, seats []st
 		return nil, err
 	}
 
-	metrics.ConfirmedTotal.Inc()
-	metrics.SeatsAvailable.WithLabelValues(showID).Sub(float64(len(seats)))
-
 	return &Reservation{
 		ReservationID: reservationID,
 		ShowID:        showID,
@@ -309,11 +317,19 @@ func (s *Service) Reserve(ctx context.Context, userID, showID string, seats []st
 // Cancel releases the seats of a reservation back to available. Only the owner
 // may cancel, and a cancel never touches seats confirmed to someone else.
 func (s *Service) Cancel(ctx context.Context, userID, reservationID string) (*Reservation, error) {
+	parsed, err := uuid.Parse(reservationID)
+	if err != nil {
+		return nil, ErrInvalidRequest
+	}
+	reservationID = parsed.String()
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
 		return nil, err
 	}
 	defer tx.Rollback(ctx)
+	if err := lockUser(ctx, tx, userID); err != nil {
+		return nil, err
+	}
 
 	var r Reservation
 	var status string
@@ -332,11 +348,23 @@ func (s *Service) Cancel(ctx context.Context, userID, reservationID string) (*Re
 		return nil, ErrNotOwner
 	}
 	if status == "cancelled" {
-		return nil, ErrAlreadyCancelled
+		r.Status = status
+		return &r, nil
+	}
+
+	rows, err := tx.Query(ctx, `SELECT label FROM seats WHERE show_id = $1 AND reservation_id = $2 ORDER BY label FOR UPDATE`, r.ShowID, reservationID)
+	if err != nil {
+		return nil, err
+	}
+	for rows.Next() {
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return nil, err
 	}
 
 	// Release only the seats still held by this reservation.
-	tag, err := tx.Exec(ctx,
+	_, err = tx.Exec(ctx,
 		`UPDATE seats
 		   SET status = 'available', held_by = NULL, reservation_id = NULL, updated_at = now()
 		 WHERE show_id = $1 AND reservation_id = $2 AND status = 'confirmed'`,
@@ -355,9 +383,6 @@ func (s *Service) Cancel(ctx context.Context, userID, reservationID string) (*Re
 	if err := tx.Commit(ctx); err != nil {
 		return nil, err
 	}
-
-	released := tag.RowsAffected()
-	metrics.SeatsAvailable.WithLabelValues(r.ShowID).Add(float64(released))
 
 	r.Status = "cancelled"
 	return &r, nil
@@ -387,30 +412,41 @@ func (s *Service) lookupByKey(ctx context.Context, tx pgx.Tx, userID, key, reque
 	return &r, true, nil
 }
 
-func dedupeSorted(in []string) []string {
+func validateSeats(in []string, maximum int) ([]string, error) {
+	if len(in) == 0 || len(in) > maximum {
+		return nil, ErrInvalidRequest
+	}
 	seen := map[string]struct{}{}
 	out := make([]string, 0, len(in))
 	for _, v := range in {
-		v = strings.TrimSpace(v)
-		if v == "" {
-			continue
+		if strings.TrimSpace(v) != v || v == "" || len(v) > 100 || strings.ContainsAny(v, "\x00\r\n") {
+			return nil, ErrInvalidRequest
 		}
 		if _, ok := seen[v]; ok {
-			continue
+			return nil, ErrInvalidRequest
 		}
 		seen[v] = struct{}{}
 		out = append(out, v)
 	}
 	sort.Strings(out)
-	return out
+	return out, nil
 }
 
 func hashRequest(showID string, sortedSeats []string) string {
-	h := sha256.New()
-	h.Write([]byte(showID))
-	h.Write([]byte{0})
-	h.Write([]byte(strings.Join(sortedSeats, ",")))
-	return hex.EncodeToString(h.Sum(nil))
+	encoded, _ := json.Marshal(struct {
+		ShowID string
+		Seats  []string
+	}{showID, sortedSeats})
+	digest := sha256.Sum256(encoded)
+	return hex.EncodeToString(digest[:])
+}
+
+func lockUser(ctx context.Context, tx pgx.Tx, userID string) error {
+	if _, err := tx.Exec(ctx, `INSERT INTO booking_users (user_id) VALUES ($1) ON CONFLICT DO NOTHING`, userID); err != nil {
+		return err
+	}
+	var lockedUser string
+	return tx.QueryRow(ctx, `SELECT user_id FROM booking_users WHERE user_id = $1 FOR UPDATE`, userID).Scan(&lockedUser)
 }
 
 func isUniqueViolation(err error) bool {
