@@ -70,6 +70,8 @@ Go unit tests cover token validation, expired/forged tokens, JSON parsing, seat 
 
 During this implementation, an isolated temporary Go compiler ran the available unit tests and compiled the database tests. PostgreSQL tests explicitly skipped because this laptop has no database or Docker runtime. GitHub Actions and the live deployment must supply the remaining runtime evidence. No live burst numbers or public URL are claimed here. Download genuine CI/live artifacts after running the workflows described in the README.
 
+On 2026-10-04, the interrupted Python dependency audit was completed. It reported vulnerabilities in the previous `aiohttp` pin, which was updated to 3.14.3. All four offline harness tests then passed and a repeat requirements audit reported no known vulnerabilities. CI repeats that audit. These checks validate the harness and its dependency advisories, not database correctness or live capacity.
+
 ## AI Usage
 
 GitHub Copilot generated the initial implementation and much of the corrected code, tests, load harness, configuration, and this documentation in response to the supplied assignment and Go/PostgreSQL blueprint. The initial draft had real defects: a per-user concurrency race, incorrect concurrent-idempotency handling, forgeable token authentication, and restart-unsafe gauges. The subsequent AI-assisted review identified and corrected these and added validation.

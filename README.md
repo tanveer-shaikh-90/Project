@@ -4,6 +4,28 @@ Go + PostgreSQL JSON API for the Paytm backend take-home. Assigned seats, atomic
 
 **Submission status:** source, tests, deployment configuration, and load harness are included. A public deployment and a successful live burst are still required. Do not treat a generated repository or a passing unit test as evidence of 20,000-client capacity. No live URL or successful live-load results have been fabricated.
 
+## Start Here
+
+You do not need to run the service on this laptop. Push the saved changes, open GitHub **Actions > Verify seat reservation**, and check the `contracts` and `container-platforms` jobs. After those pass, deploy with the Render steps below and run the optional live burst from Actions.
+
+| Verification | Current evidence |
+| --- | --- |
+| Architecture and instructions | HLD below; design rationale in [WRITEUP.md](WRITEUP.md) |
+| Offline Python harness | Four tests passed after updating `aiohttp` to 3.14.3 |
+| Python dependency audit | No known vulnerabilities reported on 2026-10-04; not a guarantee of no vulnerabilities |
+| Go checks | Unit tests and `go vet` passed on 2026-10-04; PostgreSQL tests explicitly skipped without a database |
+| Docker, database concurrency, Mac runtime | Automated checks supplied; a successful CI/runtime run is still required |
+| Public deployment and live burst | Still required; collect actual URL, metrics, and logs |
+
+Before submission, complete these checks:
+
+- [ ] Push the corrected files and confirm both required CI jobs pass for the submitted commit.
+- [ ] Confirm the public `/health/ready` endpoint works, including after a cold start.
+- [ ] Run the live burst workflow and inspect its result, not just its artifact upload status.
+- [ ] Retain the genuine burst JSON report, metrics, and live log recording or access link.
+- [ ] Provide the repository URL, exact commit, live URL, metrics URL, and burst command.
+- [ ] Read the transaction and AI-usage sections in [WRITEUP.md](WRITEUP.md) before the interview.
+
 ## HLD Architecture
 
 ```mermaid
@@ -127,6 +149,7 @@ After pushing the corrected files, open the repository's **Actions** tab. [The C
 
 - PostgreSQL 16 integration tests, repeated concurrency tests, Go vet, and the race detector.
 - Python harness unit tests.
+- Python dependency vulnerability audit.
 - Clean Docker build/start, smoke check, restart persistence check, and a 20,000-request burst at 500 maximum in-flight connections.
 - AMD64 and ARM64 container builds.
 - Prometheus rule validation and downloadable logs, metrics, and JSON reports.
