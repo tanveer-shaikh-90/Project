@@ -5,8 +5,6 @@ services:
       POSTGRES_USER: postgres
       POSTGRES_PASSWORD: postgres
       POSTGRES_DB: seats
-    ports:
-      - "5432:5432"
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U postgres -d seats"]
       interval: 3s
@@ -21,10 +19,47 @@ services:
       DATABASE_URL: postgres://postgres:postgres@db:5432/seats?sslmode=disable
       PORT: "8080"
       DB_MAX_CONNS: "25"
+      AUTH_SECRET: ${AUTH_SECRET:-local-signing-secret-not-for-production-12345}
+      ADMIN_TOKEN: ${ADMIN_TOKEN:-local-admin-credential-not-for-production-12345}
     ports:
-      - "8080:8080"
+      - "127.0.0.1:${HTTP_PORT:-8080}:8080"
     depends_on:
       db:
+        condition: service_healthy
+    restart: unless-stopped
+
+  test:
+    profiles: ["tools"]
+    build:
+      context: .
+      target: test
+    environment:
+      TEST_DATABASE_URL: postgres://postgres:postgres@db:5432/seats?sslmode=disable
+    depends_on:
+      db:
+        condition: service_healthy
+
+  load:
+    profiles: ["tools"]
+    build:
+      context: .
+      target: load
+    environment:
+      ADMIN_TOKEN: ${ADMIN_TOKEN:-local-admin-credential-not-for-production-12345}
+    depends_on:
+      api:
+        condition: service_healthy
+
+  prometheus:
+    profiles: ["observe"]
+    image: prom/prometheus:v3.5.0
+    ports:
+      - "127.0.0.1:9090:9090"
+    volumes:
+      - ./observability/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./observability/alerts.yml:/etc/prometheus/alerts.yml:ro
+    depends_on:
+      api:
         condition: service_healthy
 
 volumes:

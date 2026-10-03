@@ -14,3 +14,6 @@ vendor/
 *.log
 __pycache__/
 .venv/
+artifacts/
+.env.*
+!.env.example

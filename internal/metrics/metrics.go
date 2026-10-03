@@ -72,21 +72,21 @@ func (s *Snapshot) Collect(ch chan<- prometheus.Metric) {
 	var snapshot []prometheus.Metric
 	for rows.Next() {
 		var showID string
-		var available, held, confirmed, total float64
+		var available, held, confirmed, total int64
 		if err := rows.Scan(&showID, &available, &held, &confirmed, &total); err != nil {
 			ch <- prometheus.NewInvalidMetric(s.available, err)
 			return
 		}
 		if showID == "" {
-			snapshot = append(snapshot, prometheus.MustNewConstMetric(s.confirmed, prometheus.CounterValue, available))
+			snapshot = append(snapshot, prometheus.MustNewConstMetric(s.confirmed, prometheus.CounterValue, float64(available)))
 			continue
 		}
 		snapshot = append(snapshot,
-			prometheus.MustNewConstMetric(s.available, prometheus.GaugeValue, available, showID),
-			prometheus.MustNewConstMetric(s.total, prometheus.GaugeValue, total, showID),
-			prometheus.MustNewConstMetric(s.state, prometheus.GaugeValue, available, showID, "available"),
-			prometheus.MustNewConstMetric(s.state, prometheus.GaugeValue, held, showID, "held"),
-			prometheus.MustNewConstMetric(s.state, prometheus.GaugeValue, confirmed, showID, "confirmed"))
+			prometheus.MustNewConstMetric(s.available, prometheus.GaugeValue, float64(available), showID),
+			prometheus.MustNewConstMetric(s.total, prometheus.GaugeValue, float64(total), showID),
+			prometheus.MustNewConstMetric(s.state, prometheus.GaugeValue, float64(available), showID, "available"),
+			prometheus.MustNewConstMetric(s.state, prometheus.GaugeValue, float64(held), showID, "held"),
+			prometheus.MustNewConstMetric(s.state, prometheus.GaugeValue, float64(confirmed), showID, "confirmed"))
 	}
 	if err := rows.Err(); err != nil {
 		ch <- prometheus.NewInvalidMetric(s.available, err)

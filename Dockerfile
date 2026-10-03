@@ -1,21 +1,26 @@
-# ---- Build stage ----
-FROM golang:1.23-alpine AS build
+FROM golang:1.27.1-bookworm AS source
 WORKDIR /src
-
-# Resolve dependencies first for better layer caching. go mod tidy also
-# generates go.sum, so a clean checkout (without go.sum) still builds.
-COPY go.mod ./
-COPY go.sum* ./
-RUN go mod download || true
-
+COPY go.mod go.sum ./
+RUN go mod download && go mod verify
 COPY . .
-RUN go mod tidy
-RUN CGO_ENABLED=0 GOOS=linux go build -ldflags="-s -w" -o /app ./cmd/api
 
-# ---- Runtime stage ----
-FROM alpine:3.20
-RUN adduser -D -u 10001 appuser
+FROM source AS test
+CMD ["go", "test", "-mod=readonly", "-race", "-count=1", "-v", "-timeout=5m", "./..."]
+
+FROM source AS build
+RUN CGO_ENABLED=0 GOOS=linux go build -mod=readonly -trimpath -ldflags="-s -w" -o /app ./cmd/api
+
+FROM python:3.12-slim AS load
+WORKDIR /work
+COPY scripts/requirements.txt scripts/requirements.txt
+RUN pip install --no-cache-dir -r scripts/requirements.txt
+COPY scripts/ scripts/
+CMD ["python", "scripts/burst.py", "http://api:8080"]
+
+FROM alpine:3.23 AS runtime
+RUN apk add --no-cache ca-certificates && adduser -D -u 10001 appuser
 COPY --from=build /app /app
 USER appuser
 EXPOSE 8080
+HEALTHCHECK --interval=10s --timeout=3s --start-period=30s --retries=3 CMD wget -q -O /dev/null "http://127.0.0.1:${PORT:-8080}/health/ready" || exit 1
 ENTRYPOINT ["/app"]

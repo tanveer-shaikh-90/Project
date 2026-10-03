@@ -1,0 +1,31 @@
+groups:
+  - name: seat-reservation
+    rules:
+      - alert: ReservationServerErrors
+        expr: sum(rate(http_requests_total{route="/shows/{id}/reserve",status=~"5.."}[1m])) > 0
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: Reservation endpoint is returning server errors
+      - alert: SeatServiceUnavailable
+        expr: up{job="seat-reservation"} == 0
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: API or database-backed metrics are unavailable
+      - alert: SeatReconciliationDrift
+        expr: sum without (status) (seats_state) != seats_total
+        for: 0m
+        labels:
+          severity: critical
+        annotations:
+          summary: Seat-state counts do not reconcile
+      - alert: ReservationLatencyHigh
+        expr: histogram_quantile(0.99, sum by (le) (rate(http_request_duration_seconds_bucket{route="/shows/{id}/reserve"}[5m]))) > 5
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: Reservation p99 exceeds five seconds

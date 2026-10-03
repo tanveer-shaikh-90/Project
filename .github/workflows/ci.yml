@@ -1,0 +1,134 @@
+name: Verify seat reservation
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      base_url:
+        description: Optional deployed HTTPS URL for a live burst (requires ADMIN_TOKEN repository secret)
+        required: false
+        type: string
+      concurrency:
+        description: Maximum simultaneous live client connections
+        default: "500"
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  contracts:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: seats_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d seats_test"
+          --health-interval 5s --health-timeout 5s --health-retries 10
+    env:
+      TEST_DATABASE_URL: postgres://postgres:postgres@localhost:5432/seats_test?sslmode=disable
+      ADMIN_TOKEN: local-admin-credential-not-for-production-12345
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.27.1"
+          cache: true
+      - name: Reproducible dependencies and formatting
+        run: |
+          go mod tidy
+          git diff --exit-code -- go.mod go.sum
+          test -z "$(gofmt -l cmd internal)"
+          go mod verify
+      - name: PostgreSQL contracts and race detector
+        run: |
+          go vet ./...
+          go test -race -count=1 -timeout=5m -v ./...
+          go test -run TestPostgresContracts -count=3 -timeout=5m ./internal/api
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Harness tests
+        run: |
+          pip install -r scripts/requirements.txt
+          python -m unittest discover -s scripts -p 'test_*.py' -v
+      - name: Compose configuration and clean startup
+        run: |
+          docker compose config --quiet
+          docker compose up --build --wait --wait-timeout 180
+      - name: Smoke and restart persistence
+        run: |
+          mkdir -p artifacts
+          python scripts/burst.py http://localhost:8080 --smoke --report artifacts/smoke.json
+          curl --fail http://localhost:8080/metrics > artifacts/metrics-before.txt
+          docker compose restart api
+          docker compose up --wait --wait-timeout 120
+          curl --fail http://localhost:8080/health/ready
+          curl --fail http://localhost:8080/metrics > artifacts/metrics-after.txt
+          diff <(grep -E '^(seats_|reservations_confirmed_total)' artifacts/metrics-before.txt | sort) <(grep -E '^(seats_|reservations_confirmed_total)' artifacts/metrics-after.txt | sort)
+      - name: Twenty-thousand-request burst
+        run: python scripts/burst.py http://localhost:8080 --total 20000 --hot-users 500 --concurrency 500 --report artifacts/burst.json
+      - name: Validate Prometheus rules
+        run: docker compose --profile observe run --rm --no-deps --entrypoint promtool prometheus check rules /etc/prometheus/alerts.yml
+      - name: Collect evidence
+        if: always()
+        run: |
+          mkdir -p artifacts
+          docker compose logs --no-color > artifacts/compose.log
+          curl --fail http://localhost:8080/metrics > artifacts/metrics-final.txt || true
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: local-contract-and-burst-evidence
+          path: artifacts/
+      - name: Stop CI containers
+        if: always()
+        run: docker compose down
+
+  container-platforms:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: false
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  live-burst:
+    if: github.event_name == 'workflow_dispatch' && inputs.base_url != ''
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install -r scripts/requirements.txt
+      - name: Burst deployed service
+        env:
+          BASE_URL: ${{ inputs.base_url }}
+          CONCURRENCY: ${{ inputs.concurrency }}
+          ADMIN_TOKEN: ${{ secrets.ADMIN_TOKEN }}
+        run: |
+          mkdir -p artifacts
+          python scripts/burst.py "$BASE_URL" --total 20000 --concurrency "$CONCURRENCY" --report artifacts/live-burst.json
+          curl --fail "$BASE_URL/metrics" > artifacts/live-metrics.txt
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: live-burst-evidence
+          path: artifacts/

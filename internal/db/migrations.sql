@@ -1,8 +1,3 @@
--- Schema for the seat-reservation service.
--- Safe to run multiple times (idempotent) so a clean deploy can apply it on boot.
-
-CREATE EXTENSION IF NOT EXISTS pgcrypto;
-
 CREATE TABLE IF NOT EXISTS booking_users (
     user_id TEXT PRIMARY KEY
 );
@@ -49,3 +44,12 @@ CREATE TABLE IF NOT EXISTS reservations (
 );
 
 CREATE INDEX IF NOT EXISTS idx_reservations_show_user ON reservations (show_id, user_id);
+
+ALTER TABLE reservations ADD CONSTRAINT reservations_amount_nonnegative CHECK (amount_paise >= 0);
+ALTER TABLE reservations ADD CONSTRAINT reservations_nonempty_seats CHECK (cardinality(seats) > 0);
+ALTER TABLE reservations ADD CONSTRAINT reservations_show_identity UNIQUE (show_id, id);
+ALTER TABLE seats ADD CONSTRAINT seats_reservation_fk FOREIGN KEY (show_id, reservation_id) REFERENCES reservations (show_id, id);
+ALTER TABLE seats ADD CONSTRAINT seats_ownership_consistent CHECK (
+    (status = 'available' AND held_by IS NULL AND reservation_id IS NULL) OR
+    (status IN ('held', 'confirmed') AND held_by IS NOT NULL AND reservation_id IS NOT NULL)
+);

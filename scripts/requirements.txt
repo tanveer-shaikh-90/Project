@@ -1,0 +1,2 @@
+aiohttp==3.12.15
+prometheus-client==0.21.1
