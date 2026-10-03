@@ -85,7 +85,7 @@ func routeLabel(r *http.Request) string {
 }
 
 type Authenticator struct {
-	secret []byte
+	secret     []byte
 	adminToken string
 }
 
@@ -99,10 +99,10 @@ func NewAuthenticator(secret, adminToken string) (*Authenticator, error) {
 func (a *Authenticator) IssueToken(w http.ResponseWriter, r *http.Request) {
 	now := time.Now()
 	claims := jwt.RegisteredClaims{
-		Issuer: "seat-reservation",
-		Audience: jwt.ClaimStrings{"seat-reservation"},
-		Subject: uuid.NewString(),
-		IssuedAt: jwt.NewNumericDate(now),
+		Issuer:    "seat-reservation",
+		Audience:  jwt.ClaimStrings{"seat-reservation"},
+		Subject:   uuid.NewString(),
+		IssuedAt:  jwt.NewNumericDate(now),
 		ExpiresAt: jwt.NewNumericDate(now.Add(24 * time.Hour)),
 	}
 	token, err := jwt.NewWithClaims(jwt.SigningMethodHS256, claims).SignedString(a.secret)

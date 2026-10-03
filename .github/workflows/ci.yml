@@ -53,6 +53,8 @@ jobs:
           go vet ./...
           go test -race -count=1 -timeout=5m -v ./...
           go test -run TestPostgresContracts -count=3 -timeout=5m ./internal/api
+      - name: Go vulnerability scan
+        run: go run golang.org/x/vuln/cmd/govulncheck@latest ./...
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
@@ -76,6 +78,14 @@ jobs:
           diff <(grep -E '^(seats_|reservations_confirmed_total)' artifacts/metrics-before.txt | sort) <(grep -E '^(seats_|reservations_confirmed_total)' artifacts/metrics-after.txt | sort)
       - name: Twenty-thousand-request burst
         run: python scripts/burst.py http://localhost:8080 --total 20000 --hot-users 500 --concurrency 500 --report artifacts/burst.json
+      - name: Database outage and recovery
+        run: |
+          docker compose stop db
+          test "$(curl -s -o /dev/null -w '%{http_code}' http://localhost:8080/health/live)" = 200
+          test "$(curl -s -o /dev/null -w '%{http_code}' http://localhost:8080/health/ready)" = 503
+          docker compose start db
+          docker compose up --wait --wait-timeout 120
+          curl --fail http://localhost:8080/health/ready
       - name: Validate Prometheus rules
         run: docker compose --profile observe run --rm --no-deps --entrypoint promtool prometheus check rules /etc/prometheus/alerts.yml
       - name: Collect evidence

@@ -43,6 +43,7 @@ class Burst:
         self.base = base
         self.admin = admin
         self.outcomes = Counter()
+        self.http_statuses = Counter()
         self.latencies = []
         self.created = {}
         self.checks = []
@@ -59,8 +60,10 @@ class Burst:
                     data = {"error": "non_json"}
                 if not isinstance(data, dict):
                     data = {"error": "non_object_json"}
+                self.http_statuses[response.status] += 1
                 return response.status, data, time.monotonic() - start
         except (aiohttp.ClientError, asyncio.TimeoutError) as error:
+            self.http_statuses[0] += 1
             return 0, {"error": type(error).__name__}, time.monotonic() - start
 
     async def user(self):
@@ -96,6 +99,7 @@ class Burst:
             assert body["show_id"] == show and sorted(body["seats"]) == sorted(seats)
             assert body["amount_paise"] == 25000 * len(seats), "incorrect amount"
             if status == 201:
+                assert body["status"] == "confirmed", "new reservation not confirmed"
                 assert body["reservation_id"] not in self.created, "reservation created twice"
                 self.created[body["reservation_id"]] = body
         return result
@@ -113,10 +117,13 @@ class Burst:
 
         monitor = asyncio.create_task(observe())
         try:
-            results = await asyncio.gather(*tasks)
+            results = await asyncio.gather(*tasks, return_exceptions=True)
         finally:
             stop.set()
             await monitor
+        for result in results:
+            if isinstance(result, BaseException):
+                raise result
         print(f"{name}: {dict(distribution(results))}", flush=True)
         assert all(result[0] in (200, 201, 409) for result in results), f"{name}: unexpected HTTP or transport failure"
         return results
@@ -208,6 +215,7 @@ async def main():
             assert set(owned_seats) == {seat["label"] for seat in final["seats"] if seat["status"] == "confirmed"}
             assert max(Counter(body["user_id"] for body in confirmed).values(), default=0) <= 4
             async with session.get(burst.base + "/metrics") as response:
+                burst.http_statuses[response.status] += 1
                 assert response.status == 200, "metrics unavailable"
                 samples = [sample for family in text_string_to_metric_families(await response.text()) for sample in family.samples]
             available = [sample.value for sample in samples if sample.name == "seats_available" and sample.labels.get("show_id") == show]
@@ -220,8 +228,9 @@ async def main():
         finally:
             latencies = sorted(burst.latencies)
             report.update(outcomes=dict(burst.outcomes), elapsed_seconds=round(time.monotonic() - started, 3))
-            report["server_errors"] = sum(count for key, count in burst.outcomes.items() if key.startswith("5"))
-            report["transport_errors"] = sum(count for key, count in burst.outcomes.items() if key.startswith("0:"))
+            report["http_statuses"] = dict(burst.http_statuses)
+            report["server_errors"] = sum(count for status, count in burst.http_statuses.items() if status >= 500)
+            report["transport_errors"] = burst.http_statuses[0]
             if latencies:
                 report["latency_ms"] = {name: round(latencies[min(len(latencies)-1, int(len(latencies)*quantile))] * 1000, 2) for name, quantile in (("p50", .50), ("p95", .95), ("p99", .99))}
             print(json.dumps(report, indent=2), flush=True)

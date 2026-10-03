@@ -54,7 +54,9 @@ func (s *Server) Router() http.Handler {
 		r.Post("/reservations/{id}/cancel", s.handleCancel)
 	})
 	r.NotFound(func(w http.ResponseWriter, r *http.Request) { writeError(w, r, 404, "not_found", "route not found") })
-	r.MethodNotAllowed(func(w http.ResponseWriter, r *http.Request) { writeError(w, r, 405, "method_not_allowed", "method not allowed") })
+	r.MethodNotAllowed(func(w http.ResponseWriter, r *http.Request) {
+		writeError(w, r, 405, "method_not_allowed", "method not allowed")
+	})
 
 	return r
 }

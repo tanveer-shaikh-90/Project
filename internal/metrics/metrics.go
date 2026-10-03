@@ -4,9 +4,9 @@ import (
 	"context"
 	"time"
 
-	"github.com/tanveer-shaikh-90/seat-reservation/internal/db"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promauto"
+	"github.com/tanveer-shaikh-90/seat-reservation/internal/db"
 )
 
 var (
@@ -36,16 +36,16 @@ const (
 )
 
 type Snapshot struct {
-	pool *db.Pool
+	pool                               *db.Pool
 	available, state, total, confirmed *prometheus.Desc
 }
 
 func NewSnapshot(pool *db.Pool) *Snapshot {
 	return &Snapshot{
-		pool: pool,
+		pool:      pool,
 		available: prometheus.NewDesc("seats_available", "Available seats from a database snapshot.", []string{"show_id"}, nil),
-		state: prometheus.NewDesc("seats_state", "Seats by current state.", []string{"show_id", "status"}, nil),
-		total: prometheus.NewDesc("seats_total", "Physical seats in a show.", []string{"show_id"}, nil),
+		state:     prometheus.NewDesc("seats_state", "Seats by current state.", []string{"show_id", "status"}, nil),
+		total:     prometheus.NewDesc("seats_total", "Physical seats in a show.", []string{"show_id"}, nil),
 		confirmed: prometheus.NewDesc("reservations_confirmed_total", "Committed reservations, including subsequently cancelled ones.", nil, nil),
 	}
 }
