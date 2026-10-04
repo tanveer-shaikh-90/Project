@@ -2,28 +2,39 @@
 
 Go + PostgreSQL JSON API for the Paytm backend take-home. Assigned seats, atomic all-or-nothing reservations, per-user limits, idempotency, owner-only cancellation, health checks, Prometheus metrics, and structured logs.
 
-**Submission status:** source, tests, deployment configuration, and load harness are included. A public deployment and a successful live burst are still required. Do not treat a generated repository or a passing unit test as evidence of 20,000-client capacity. No live URL or successful live-load results have been fabricated.
+**Submission status (2026-10-04):** the API is deployed on Render and CI passed for commit `3b958bb599ab15fc3eb864d11d4a4177eddf303b`. A browser-driven live hot-seat check completed 500 attempts with one HTTP 201, 499 HTTP 409 responses, and zero 5xx or transport errors. The full deployed burst and a shareable recording of live logs under load are still outstanding. The CI test used 20,000 requests at up to 500 concurrent connections; it does not prove 20,000-concurrent-client capacity on the public service.
+
+- API: https://project-ek0s.onrender.com
+- Liveness: https://project-ek0s.onrender.com/health/live
+- Database readiness: https://project-ek0s.onrender.com/health/ready
+- Prometheus metrics: https://project-ek0s.onrender.com/metrics
+- Passing CI and artifacts: https://github.com/tanveer-shaikh-90/Project/actions/runs/37201475787
 
 ## Start Here
 
-You do not need to run the service on this laptop. Push the saved changes, open GitHub **Actions > Verify seat reservation**, and check the `contracts` and `container-platforms` jobs. After those pass, deploy with the Render steps below and run the optional live burst from Actions.
+You do not need to run the service on this laptop. The linked CI run passed both `contracts` and `container-platforms`; its `live-burst` job was skipped. Use GitHub **Actions > Verify seat reservation** to revalidate changes and run the deployed burst using the instructions below. Download and inspect the genuine report and collect live logs before claiming full live-load verification.
 
 | Verification | Current evidence |
 | --- | --- |
 | Architecture and instructions | HLD below; design rationale in [WRITEUP.md](WRITEUP.md) |
 | Offline Python harness | Four tests passed after updating `aiohttp` to 3.14.3 |
 | Python dependency audit | No known vulnerabilities reported on 2026-10-04; not a guarantee of no vulnerabilities |
-| Go checks | Unit tests and `go vet` passed on 2026-10-04; PostgreSQL tests explicitly skipped without a database |
-| Docker, database concurrency, Mac runtime | Automated checks supplied; a successful CI/runtime run is still required |
-| Public deployment and live burst | Still required; collect actual URL, metrics, and logs |
+| Go and PostgreSQL checks | CI passed unit and database concurrency tests, race checks, `go vet`, and the vulnerability scan |
+| Docker and recovery | CI passed AMD64/ARM64 container builds, clean Compose startup, restart persistence, and database outage/recovery checks; Mac runtime not tested |
+| CI burst | 20,000 spread requests at up to 500 connections, plus hot-seat, retry, limit, and cancellation checks; passed against CI containers |
+| Public deployment | Render deployment `dep-db14i32d0e5s73e2uod0` is live using the internal PostgreSQL connection; liveness and readiness returned 200 |
+| Focused live checks | 500 hot-seat attempts: 1 HTTP 201, 499 HTTP 409, zero 5xx/transport errors; identity, integer amounts, concurrent limits, retries, atomicity, cancellation/rebooking, persistence, and API/metrics reconciliation also passed |
+| Outstanding live evidence | Full deployed burst, 20,000-concurrent-client validation, and shareable live logs/recording; CI Compose logs are not live-deployment logs |
 
 Before submission, complete these checks:
 
-- [ ] Push the corrected files and confirm both required CI jobs pass for the submitted commit.
-- [ ] Confirm the public `/health/ready` endpoint works, including after a cold start.
+- [x] Confirm both required CI jobs pass for deployed commit `3b958bb599ab15fc3eb864d11d4a4177eddf303b`.
+- [x] Confirm the public `/health/ready` endpoint works after redeployment.
+- [ ] Confirm recovery from a free-tier idle cold start.
+- [ ] Publish the updated verification documentation and revalidate any later code changes.
 - [ ] Run the live burst workflow and inspect its result, not just its artifact upload status.
 - [ ] Retain the genuine burst JSON report, metrics, and live log recording or access link.
-- [ ] Provide the repository URL, exact commit, live URL, metrics URL, and burst command.
+- [x] Provide the repository URL, exact commit, live URL, metrics URL, and burst command in this README and the submission draft.
 - [ ] Read the transaction and AI-usage sections in [WRITEUP.md](WRITEUP.md) before the interview.
 
 ## HLD Architecture
