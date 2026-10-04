@@ -2,6 +2,7 @@ package api
 
 import (
 	"context"
+	"crypto/sha256"
 	"crypto/subtle"
 	"errors"
 	"log/slog"
@@ -90,10 +91,15 @@ type Authenticator struct {
 }
 
 func NewAuthenticator(secret, adminToken string) (*Authenticator, error) {
-	if len(secret) < 32 || len(adminToken) < 32 || secret == adminToken {
-		return nil, errors.New("AUTH_SECRET and ADMIN_TOKEN must be distinct secrets of at least 32 bytes")
+	if secret == "" || adminToken == "" {
+		return nil, errors.New("AUTH_SECRET and ADMIN_TOKEN must both be set")
 	}
-	return &Authenticator{secret: []byte(secret), adminToken: adminToken}, nil
+	if secret == adminToken {
+		return nil, errors.New("AUTH_SECRET and ADMIN_TOKEN must be different values")
+	}
+	// Derive a fixed 32-byte HMAC key so any high-entropy secret length is accepted.
+	key := sha256.Sum256([]byte(secret))
+	return &Authenticator{secret: key[:], adminToken: adminToken}, nil
 }
 
 func (a *Authenticator) IssueToken(w http.ResponseWriter, r *http.Request) {
