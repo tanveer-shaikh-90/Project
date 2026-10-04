@@ -18,7 +18,7 @@ COPY scripts/ scripts/
 CMD ["python", "scripts/burst.py", "http://api:8080"]
 
 FROM alpine:3.23 AS runtime
-RUN apk add --no-cache ca-certificates && adduser -D -u 10001 appuser
+RUN apk add --no-cache ca-certificates wget && adduser -D -u 10001 appuser
 COPY --from=build /app /app
 USER appuser
 EXPOSE 8080
